@@ -32,20 +32,70 @@ app.post("/board-update/:boardId", (req, res) => {
   res.json({ success: true, message: `Update broadcasted to board ${boardId}` });
 });
 
+// boardId -> Map<userName, user>
+const boardUsers = new Map();
+// socketId -> { boardId, user }
+const socketMeta = new Map();
+
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
-  
-  socket.on("join-board", (boardId) => {
-    console.log(`Client ${socket.id} joined board ${boardId}`);
+
+  socket.on("join-board", (data) => {
+    const boardId = typeof data === "string" ? data : data?.boardId;
+    const user = typeof data === "object" ? data?.user : null;
+    if (!boardId) return;
+
     socket.join(boardId);
+
+    if (user) {
+      if (!boardUsers.has(boardId)) boardUsers.set(boardId, new Map());
+      boardUsers.get(boardId).set(user.name, { ...user, socketId: socket.id });
+      socketMeta.set(socket.id, { boardId, user });
+      const users = Array.from(boardUsers.get(boardId).values());
+      io.to(boardId).emit("users-update", users);
+      socket.to(boardId).emit("user-joined", user);
+    }
+
+    console.log(`Client ${socket.id} (${user?.name ?? "unknown"}) joined board ${boardId}`);
   });
 
-  socket.on("leave-board", (boardId) => {
-    console.log(`Client ${socket.id} left board ${boardId}`);
+  socket.on("leave-board", (data) => {
+    const boardId = typeof data === "string" ? data : data?.boardId;
+    const user = typeof data === "object" ? data?.user : null;
+    if (!boardId) return;
+
     socket.leave(boardId);
+
+    if (user && boardUsers.has(boardId)) {
+      boardUsers.get(boardId).delete(user.name);
+      socketMeta.delete(socket.id);
+      const users = Array.from(boardUsers.get(boardId).values());
+      io.to(boardId).emit("users-update", users);
+      socket.to(boardId).emit("user-left", user);
+    }
+
+    console.log(`Client ${socket.id} (${user?.name ?? "unknown"}) left board ${boardId}`);
   });
-  
+
+  socket.on("get-board-users", (boardId) => {
+    const users = boardUsers.has(boardId)
+      ? Array.from(boardUsers.get(boardId).values())
+      : [];
+    socket.emit("users-update", users);
+  });
+
   socket.on("disconnect", () => {
+    const meta = socketMeta.get(socket.id);
+    if (meta) {
+      const { boardId, user } = meta;
+      if (boardUsers.has(boardId)) {
+        boardUsers.get(boardId).delete(user.name);
+        const users = Array.from(boardUsers.get(boardId).values());
+        io.to(boardId).emit("users-update", users);
+        io.to(boardId).emit("user-left", user);
+      }
+      socketMeta.delete(socket.id);
+    }
     console.log(`Client disconnected: ${socket.id}`);
   });
 });
